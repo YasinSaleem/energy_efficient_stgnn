@@ -1,3 +1,6 @@
+# Custom
+splits/
+extracted/
 # Python
 __pycache__/
 *.py[cod]
