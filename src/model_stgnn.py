@@ -13,6 +13,7 @@ Author: Energy-Efficient STGNN Project
 """
 
 import json
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +21,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from scipy.sparse import load_npz
+
+# Add parent directory to path for imports
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+from utils import config as cfg
 
 
 # ============================================================================
@@ -96,8 +101,11 @@ class SpatialGCNLayer(nn.Module):
                  in_features: int,
                  out_features: int,
                  activation: Optional[nn.Module] = nn.ReLU(),
-                 dropout: float = 0.0):
+                 dropout: float = None):
         super().__init__()
+        # Use config default if not specified
+        if dropout is None:
+            dropout = cfg.SPATIAL_DROPOUT
         self.lin = nn.Linear(in_features, out_features, bias=True)
         self.activation = activation
         self.dropout = nn.Dropout(dropout)
@@ -149,13 +157,20 @@ class STGNNModel(nn.Module):
     def __init__(self,
                  num_nodes: int,
                  in_features: int = 1,
-                 gcn_hidden: int = 16,
-                 gcn_layers: int = 1,
-                 gru_hidden: int = 32,
-                 horizon: int = 6,
-                 dropout: float = 0.1,
+                 gcn_hidden: int = None,
+                 gcn_layers: int = None,
+                 gru_hidden: int = None,
+                 horizon: int = None,
+                 dropout: float = None,
                  adj: Optional[torch.Tensor] = None):
         super().__init__()
+
+        # Use config defaults if not specified
+        gcn_hidden = gcn_hidden or cfg.GCN_HIDDEN
+        gcn_layers = gcn_layers or cfg.GCN_LAYERS
+        gru_hidden = gru_hidden or cfg.GRU_HIDDEN
+        horizon = horizon or cfg.HORIZON
+        dropout = dropout or cfg.SPATIAL_DROPOUT
 
         self.num_nodes = num_nodes
         self.in_features = in_features
@@ -181,18 +196,23 @@ class STGNNModel(nn.Module):
 
         # Temporal GRU over time for each node
         # We'll reshape [B, T, N, F] -> [B*N, T, F]
+        # Note: GRU dropout only applies when num_layers > 1, so we add manual dropout
         self.gru = nn.GRU(
             input_size=gcn_hidden,
             hidden_size=gru_hidden,
             num_layers=1,
             batch_first=True,
-            dropout=0.0
+            dropout=0.0  # Not used for single layer
         )
+
+        # Manual dropout for GRU output (since built-in dropout doesn't work with 1 layer)
+        self.gru_dropout = nn.Dropout(cfg.TEMPORAL_DROPOUT)
 
         # Readout: hidden state -> HORIZON
         self.fc_out = nn.Linear(gru_hidden, horizon)
 
-        self.dropout = nn.Dropout(dropout)
+        # Final dropout before output
+        self.dropout = nn.Dropout(cfg.FINAL_DROPOUT)
 
     def forward(self, x):
         """
@@ -216,10 +236,12 @@ class STGNNModel(nn.Module):
         gru_out, h_final = self.gru(h_seq)  # h_final: [1, B*N, gru_hidden]
         h_last = h_final[-1]                # [B*N, gru_hidden]
 
-        h_last = self.dropout(h_last)
+        # Apply temporal dropout to GRU output
+        h_last = self.gru_dropout(h_last)
 
         # ----- Readout -----
         out = self.fc_out(h_last)  # [B*N, horizon]
+        out = self.dropout(out)    # Apply final dropout
         out = out.view(B, N, self.horizon)  # [B, N, H]
         out = out.permute(0, 2, 1)          # [B, H, N]
 
@@ -232,22 +254,23 @@ class STGNNModel(nn.Module):
 
 def build_stgnn(
         in_features: int = 1,
-        gcn_hidden: int = 16,
-        gcn_layers: int = 1,
-        gru_hidden: int = 32,
-        horizon: int = 6,
-        dropout: float = 0.1
+        gcn_hidden: int = None,
+        gcn_layers: int = None,
+        gru_hidden: int = None,
+        horizon: int = None,
+        dropout: float = None
 ) -> STGNNModel:
     """
     Convenience builder that:
     - Loads adjacency + node count
-    - Instantiates STGNNModel with sensible defaults
+    - Instantiates STGNNModel with config defaults
+    - All parameters optional; uses utils.config if not specified
     """
     adj, num_nodes = load_adjacency_and_num_nodes()
     model = STGNNModel(
         num_nodes=num_nodes,
         in_features=in_features,
-        gcn_hidden=gcn_hidden,
+        gcn_hidden=gcn_hidden,  # Will use config default if None
         gcn_layers=gcn_layers,
         gru_hidden=gru_hidden,
         horizon=horizon,

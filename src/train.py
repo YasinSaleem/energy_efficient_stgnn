@@ -1,46 +1,68 @@
 #!/usr/bin/env python3
 """
-STGNN Training Script (GPU Forced + Early Stopping + Metrics)
+STGNN Training Script (Improved with Regularization)
 
 ✅ Forces CUDA GPU
 ✅ Progress bars (tqdm)
+✅ Enhanced regularization (dropout, weight decay, gradient clipping)
+✅ Learning rate scheduler (ReduceLROnPlateau)
 ✅ Early stopping for energy efficiency
 ✅ Tracks MSE, RMSE, MAE
 ✅ Saves best validation model
-✅ Designed for 1–2 hour training window
+✅ Centralized configuration
 """
 
+import sys
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
-from pathlib import Path
 import numpy as np
 
-from data_preprocessing import get_base_dataloaders
-from model_stgnn import build_stgnn
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+from utils import config as cfg
+from src.data_preprocessing import get_base_dataloaders
+from src.model_stgnn import build_stgnn
 
 # ============================
-# FORCE GPU
+# DEVICE SELECTION (CUDA or MPS)
 # ============================
 
-if not torch.cuda.is_available():
-    raise RuntimeError("❌ CUDA GPU not detected. Training is GPU-only.")
-
-DEVICE = torch.device("cuda")
-print(f"\n✅ Training on GPU: {torch.cuda.get_device_name(0)}")
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+    print(f"\n✅ Training on CUDA GPU: {torch.cuda.get_device_name(0)}")
+elif torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+    print(f"\n✅ Training on Apple Silicon GPU (MPS)")
+else:
+    raise RuntimeError("❌ No GPU detected. Training requires either CUDA or MPS GPU.")
 
 # ============================
-# CONFIGURATION
+# CONFIGURATION (from utils.config)
 # ============================
 
-EPOCHS = 30                # Fits 1–2 hour window
-LEARNING_RATE = 1e-3
-WEIGHT_DECAY = 1e-4
+print("\n" + "="*80)
+print("TRAINING CONFIGURATION")
+print("="*80)
+print(f"  Max Epochs:              {cfg.EPOCHS}")
+print(f"  Learning Rate:           {cfg.LEARNING_RATE}")
+print(f"  Weight Decay:            {cfg.WEIGHT_DECAY}")
+print(f"  Gradient Clip Norm:      {cfg.GRADIENT_CLIP_NORM}")
+print(f"  Early Stopping Patience: {cfg.EARLY_STOPPING_PATIENCE}")
+print(f"  Batch Size:              {cfg.BATCH_SIZE}")
+print(f"")
+print(f"  Spatial Dropout:         {cfg.SPATIAL_DROPOUT}")
+print(f"  Temporal Dropout:        {cfg.TEMPORAL_DROPOUT}")
+print(f"  Final Dropout:           {cfg.FINAL_DROPOUT}")
+print(f"")
+print(f"  Scheduler Mode:          {cfg.SCHEDULER_MODE}")
+print(f"  Scheduler Factor:        {cfg.SCHEDULER_FACTOR}")
+print(f"  Scheduler Patience:      {cfg.SCHEDULER_PATIENCE}")
+print(f"  Scheduler Min LR:        {cfg.SCHEDULER_MIN_LR}")
+print("="*80 + "\n")
 
-EARLY_STOPPING_PATIENCE = 6   # Stop after 6 bad val epochs
-
-MODEL_DIR = Path("models")
+MODEL_DIR = Path(__file__).parent / "models"
 MODEL_DIR.mkdir(exist_ok=True)
 MODEL_PATH = MODEL_DIR / "stgnn_best.pt"
 
@@ -70,6 +92,10 @@ def train_one_epoch(model, loader, optimizer, loss_fn):
         preds = model(X)
         loss = loss_fn(preds, Y)
         loss.backward()
+        
+        # Gradient clipping to prevent exploding gradients
+        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.GRADIENT_CLIP_NORM)
+        
         optimizer.step()
 
         total_loss += loss.item()
@@ -112,7 +138,23 @@ def main():
     print("\n🧠 Building STGNN Model...")
     model = build_stgnn().to(DEVICE)
 
-    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    # Optimizer with weight decay (L2 regularization)
+    optimizer = optim.AdamW(
+        model.parameters(), 
+        lr=cfg.LEARNING_RATE, 
+        weight_decay=cfg.WEIGHT_DECAY
+    )
+    
+    # Learning rate scheduler - reduces LR when validation plateaus
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode=cfg.SCHEDULER_MODE,
+        factor=cfg.SCHEDULER_FACTOR,
+        patience=cfg.SCHEDULER_PATIENCE,
+        min_lr=cfg.SCHEDULER_MIN_LR
+    )
+    print(f"[scheduler] ReduceLROnPlateau configured (factor={cfg.SCHEDULER_FACTOR}, patience={cfg.SCHEDULER_PATIENCE})")
+    
     loss_fn = nn.MSELoss()
 
     best_val_rmse = float("inf")
@@ -120,8 +162,8 @@ def main():
 
     print("\n🚀 Starting Training...\n")
 
-    for epoch in range(1, EPOCHS + 1):
-        print(f"\n========== EPOCH {epoch}/{EPOCHS} ==========")
+    for epoch in range(1, cfg.EPOCHS + 1):
+        print(f"\n========== EPOCH {epoch}/{cfg.EPOCHS} ==========")
 
         train_loss = train_one_epoch(model, train_loader, optimizer, loss_fn)
         val_mse, val_rmse, val_mae = validate(model, val_loader)
@@ -130,6 +172,10 @@ def main():
         print(f"Val   MSE: {val_mse:.6f}")
         print(f"Val   RMSE: {val_rmse:.6f}")
         print(f"Val   MAE: {val_mae:.6f}")
+        print(f"Current LR: {optimizer.param_groups[0]['lr']:.2e}")
+
+        # Step scheduler based on validation RMSE
+        scheduler.step(val_rmse)
 
         # ✅ Save best model
         if val_rmse < best_val_rmse:
@@ -139,10 +185,10 @@ def main():
             print(f"💾 Best Model Saved → {MODEL_PATH}")
         else:
             patience_counter += 1
-            print(f"⏳ EarlyStopping Counter: {patience_counter}/{EARLY_STOPPING_PATIENCE}")
+            print(f"⏳ EarlyStopping Counter: {patience_counter}/{cfg.EARLY_STOPPING_PATIENCE}")
 
         # ✅ EARLY STOPPING
-        if patience_counter >= EARLY_STOPPING_PATIENCE:
+        if patience_counter >= cfg.EARLY_STOPPING_PATIENCE:
             print("\n🛑 Early stopping triggered to save energy.")
             break
 
