@@ -34,12 +34,12 @@ PLOTS_DIR = RESULTS_ROOT / "plots"
 
 # Basic training settings
 EPOCHS = 20                          # Maximum epochs (reduced from 30)
-LEARNING_RATE = 1e-3                 # Initial learning rate
+LEARNING_RATE = 8e-4                 # Initial learning rate (reduced from 1e-3)
 WEIGHT_DECAY = 5e-4                  # L2 regularization (increased from 1e-4)
-EARLY_STOPPING_PATIENCE = 3          # Stop after N bad epochs (reduced from 6)
+EARLY_STOPPING_PATIENCE = 6          # Stop after N bad epochs (back to original)
 
 # Gradient clipping
-GRADIENT_CLIP_NORM = 1.0             # Max gradient norm for clipping
+GRADIENT_CLIP_NORM = 2.0             # Max gradient norm for clipping (less conservative)
 
 # Learning rate scheduler (ReduceLROnPlateau)
 SCHEDULER_MODE = 'min'               # Minimize validation metric
@@ -61,9 +61,9 @@ GRU_HIDDEN = 32                      # Hidden state size in GRU
 GRU_LAYERS = 1                       # Number of GRU layers
 
 # Regularization
-SPATIAL_DROPOUT = 0.3                # Dropout in GCN layers (increased from 0.1)
-TEMPORAL_DROPOUT = 0.3               # Dropout in GRU (enabled, was 0.0)
-FINAL_DROPOUT = 0.3                  # Dropout before output layer
+SPATIAL_DROPOUT = 0.2                # Dropout in GCN layers (moderate increase from 0.1)
+TEMPORAL_DROPOUT = 0.2               # Dropout in GRU (moderate, was 0.0)
+FINAL_DROPOUT = 0.2                  # Dropout before output layer
 
 # Forecasting
 HORIZON = 6                          # Hours to forecast ahead
