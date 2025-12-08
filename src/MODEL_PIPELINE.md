@@ -258,7 +258,7 @@ python src/continual_learning.py
 
 **Command:**
 ```bash
-python src/energy_tracking.py
+python src/energy_tracking_continual.py
 ```
 
 **Important:** This script internally runs the full continual learning loop. You do not need to run `continual_learning.py` separately if you use this; it will:
@@ -340,7 +340,7 @@ python src/evaluate.py
 python src/continual_learning.py
 
 # 5) Continual learning + energy tracking
-python src/energy_tracking.py
+python src/energy_tracking_continual.py
 
 # 6) Energy-aware scheduling simulation (offline)
 python src/energy_aware_scheduling.py
