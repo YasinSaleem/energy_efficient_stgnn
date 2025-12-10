@@ -431,6 +431,7 @@ def build_graph():
     except Exception as e:
         print(f"\n{'=' * 70}")
         print(f"❌ ERROR: {str(e)}")
+
         print(f"{'=' * 70}")
         raise
 

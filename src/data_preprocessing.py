@@ -1,222 +1,295 @@
 #!/usr/bin/env python3
 """
-Temporal Data Pipeline for Energy-Efficient ST-GNN (GPU + RAM SAFE)
+Data loading and SmartScaler-based normalization for STGNN.
 
-- Loads split CSVs (train/val/test + CL windows)
-- Aligns all households on a common UNION timeline
-- Applies global StandardScaler (fit on train only)
-- Uses LAZY sliding windows (NO RAM overflow)
-- Returns true ST-GNN tensors:
-      X: [B, 24, N, 1]
-      Y: [B, 6, N]
-- GPU efficient: pin_memory + lazy loading
-
-Author: Energy-Efficient STGNN Project
+Key design:
+- Work entirely on CPU here.
+- Only individual batches are moved to GPU inside train.py.
+- Windowing is done on-the-fly in Dataset to avoid huge memory usage.
 """
 
-import json
 import numpy as np
 import pandas as pd
-from pathlib import Path
-from typing import Dict, Tuple
-
 import torch
+from pathlib import Path
 from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import StandardScaler
-import joblib
-from tqdm import tqdm
-import warnings
 
-warnings.filterwarnings("ignore")
+from utils import config as cfg
 
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
+SPLITS_DIR = cfg.SPLITS_DIR
+TRAIN_DIR = SPLITS_DIR / "train"
+VAL_DIR   = SPLITS_DIR / "val"
+TEST_DIR  = SPLITS_DIR / "test"
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SCALER_PATH = cfg.PROCESSED_DIR / "scaler_stgnn.pkl"
 
-SPLITS_ROOT = PROJECT_ROOT / "data" / "splits"
-TRAIN_DIR = SPLITS_ROOT / "train"
-VAL_DIR = SPLITS_ROOT / "val"
-TEST_DIR = SPLITS_ROOT / "test"
-CL_DIR = SPLITS_ROOT / "continual"
-
-NODE_MAP_PATH = PROJECT_ROOT / "data" / "processed" / "node_map.json"
-SCALER_PATH = PROJECT_ROOT / "data" / "processed" / "scaler_stgnn.pkl"
-
-# Temporal setup
-WINDOW_SIZE = 24      # past 24 hours
-HORIZON = 6           # predict next 6 hours
-STEP_SIZE = 1
-
-# Loader setup (RTX SAFE)
-BATCH_SIZE = 4        # ✅ RTX 4050 safe
-NUM_WORKERS = 0       # ✅ Windows safe
+TIMESTAMP_COL = "timestamp"
+TARGET_COL    = "kWh"
 
 
 # ============================================================================
-# CORE UTILITIES
+# SmartScaler (same behavior as your previous logs)
 # ============================================================================
 
-def load_node_map():
-    with NODE_MAP_PATH.open("r") as f:
-        node_map = json.load(f)
-    print(f"[node_map] Loaded {len(node_map):,} nodes")
-    return node_map
+class SmartScaler:
+    """
+    Simple global mean/std scaler for all entries (matching your previous logs).
+    """
 
+    def __init__(self):
+        self.mean_ = None
+        self.std_  = None
 
-def load_split_timeseries(split_dir: Path, node_map: Dict[str, int]):
-    if not split_dir.exists():
-        raise FileNotFoundError(f"Split not found: {split_dir}")
+    def fit(self, x: np.ndarray):
+        """
+        x: 2D array [T, N] of kWh values.
+        """
+        flat = x.reshape(-1)
+        non_zero = flat[flat > 0]
 
-    csv_files = sorted(split_dir.glob("*.csv"))
-    print(f"[{split_dir.name}] Using {len(csv_files):,} households")
+        total_samples = flat.shape[0]
+        zeros = np.sum(flat == 0)
+        print("\n[scaler] Analyzing data...")
+        print(f"  Total samples: {total_samples}")
+        print(f"  Min: {flat.min():.6f}")
+        print(f"  Max: {flat.max():.6f}")
+        print(f"  Zeros: {zeros} ({zeros / total_samples * 100:.1f}%)")
+        if non_zero.size > 0:
+            print(f"  Non-zero min: {non_zero.min():.6f}")
+            print(f"  Non-zero max: {non_zero.max():.6f}")
+            print(f"  Non-zero median: {np.median(non_zero):.6f}")
+            print(f"  Non-zero mean: {np.mean(non_zero):.6f}")
+            print(f"  Non-zero std: {np.std(non_zero):.6f}")
 
-    # ✅ TIMELINE UNION
-    global_timestamps = set()
-    print(f"[{split_dir.name}] Scanning timestamps...")
-    for f in tqdm(csv_files):
-        df = pd.read_csv(f, usecols=["timestamp"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        df.dropna(inplace=True)
-        global_timestamps.update(df["timestamp"].values)
+        self.mean_ = float(np.mean(flat))
+        self.std_  = float(np.std(flat))
 
-    timestamps = sorted(global_timestamps)
-    T, N = len(timestamps), len(node_map)
-    panel = np.zeros((T, N), dtype=np.float32)
-    ts_index = pd.Index(timestamps)
+        print("\n[scaler] Chosen parameters:")
+        print(f"  Center (global mean): {self.mean_:.6f}")
+        print(f"  Scale  (global std):  {self.std_:.6f}")
 
-    print(f"[{split_dir.name}] Aligning households...")
-    for f in tqdm(csv_files):
-        hh_id = f.stem
-        if hh_id not in node_map:
-            continue
+    def transform(self, x: np.ndarray) -> np.ndarray:
+        return (x - self.mean_) / (self.std_ + 1e-8)
 
-        idx = node_map[hh_id]
-        df = pd.read_csv(f, usecols=["timestamp", "kWh"])
-        df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-        df.dropna(inplace=True)
-        df.sort_values("timestamp", inplace=True)
+    def fit_transform(self, x: np.ndarray) -> np.ndarray:
+        self.fit(x)
+        return self.transform(x)
 
-        s = df.set_index("timestamp")["kWh"]
-        s = s.reindex(ts_index).ffill().bfill().fillna(0.0)
-        panel[:, idx] = s.values.astype(np.float32)
+    def save(self, path: Path):
+        import pickle
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            pickle.dump({"mean": self.mean_, "std": self.std_}, f)
 
-    print(f"[{split_dir.name}] Panel shape: {panel.shape}")
-    return panel
-
-
-def fit_scaler(panel):
-    scaler = StandardScaler()
-    flat = panel.reshape(-1, 1)
-    scaler.fit(flat)
-    joblib.dump(scaler, SCALER_PATH)
-    print(f"[scaler] Saved to {SCALER_PATH}")
-    return scaler
-
-
-def apply_scaler(panel, scaler):
-    flat = panel.reshape(-1, 1)
-    scaled = scaler.transform(flat)
-    return scaled.reshape(panel.shape).astype(np.float32)
+    def load(self, path: Path):
+        import pickle
+        with open(path, "rb") as f:
+            obj = pickle.load(f)
+        self.mean_ = obj["mean"]
+        self.std_  = obj["std"]
 
 
 # ============================================================================
-# LAZY ST-GNN DATASET (NO MEMORY EXPLOSION)
+# Helper: load full (T,N) matrix using a reference timeline
+# ============================================================================
+
+def load_split_matrix(split_dir: Path):
+    """
+    Load all CSVs in split_dir and stack them into a matrix [T, N_nodes].
+
+    Strategy:
+    - Use the timestamps from the FIRST CSV as the reference time index.
+    - For every other household, align (reindex) to that index.
+    - Fill missing timestamps with 0.0 for that household.
+
+    This mirrors your original behavior where you had:
+      Train: (9222, 8442)
+      Val:   (1976, 8442)
+      Test:  (1977, 8442)
+    even though individual files had slightly different lengths.
+    """
+
+    csv_files = sorted(list(split_dir.glob("*.csv")))
+    if not csv_files:
+        raise FileNotFoundError(f"No CSV files found in {split_dir}")
+
+    print(f"[{split_dir.name}] Found {len(csv_files)} files")
+
+    # Reference index from the first file
+    first_df = pd.read_csv(csv_files[0], usecols=[TIMESTAMP_COL, TARGET_COL])
+    base_ts = pd.to_datetime(first_df[TIMESTAMP_COL])
+    base_index = base_ts.sort_values()
+    T = len(base_index)
+    N = len(csv_files)
+
+    print(f"  Example file: {csv_files[0].name}, rows={len(first_df)}")
+    print(f"[{split_dir.name}] Using {T} reference timestamps across {N} nodes")
+
+    mat = np.zeros((T, N), dtype=np.float32)
+
+    # Fill first column directly from first file (aligned to base_index)
+    s0 = pd.Series(first_df[TARGET_COL].astype(np.float32).values, index=base_ts)
+    aligned0 = s0.reindex(base_index)
+    if aligned0.isna().any():
+        aligned0 = aligned0.fillna(0.0)
+    mat[:, 0] = aligned0.values.astype(np.float32)
+
+    # Process remaining files
+    for j, f in enumerate(csv_files[1:], start=1):
+        df = pd.read_csv(f, usecols=[TIMESTAMP_COL, TARGET_COL])
+        ts = pd.to_datetime(df[TIMESTAMP_COL])
+        s = pd.Series(df[TARGET_COL].astype(np.float32).values, index=ts)
+
+        aligned = s.reindex(base_index)
+        if aligned.isna().any():
+            aligned = aligned.fillna(0.0)
+
+        mat[:, j] = aligned.values.astype(np.float32)
+
+        if j % 1000 == 0:
+            print(f"  Processed {j} / {len(csv_files)} files for alignment...")
+
+    print(f"[{split_dir.name}] Final matrix shape: {mat.shape[0]} timestamps × {mat.shape[1]} nodes")
+    return base_index, mat
+
+
+# ============================================================================
+# Dataset: windowing on-the-fly (CPU only)
 # ============================================================================
 
 class STGNNDataset(Dataset):
-    def __init__(self, panel, window, horizon):
-        self.panel = panel
-        self.window = window
+    """
+    Dataset for STGNN.
+
+    data_matrix: np.ndarray [T, N]
+    Returns X: [W, N, 1], Y: [H, N, 1]
+    DataLoader will stack -> X: [B, W, N, 1]
+    """
+
+    def __init__(self, data_matrix: np.ndarray, window_size: int, horizon: int):
+        super().__init__()
+        self.data = torch.from_numpy(data_matrix.astype(np.float32))  # [T, N] on CPU
+        self.window_size = window_size
         self.horizon = horizon
-        self.T, self.N = panel.shape
-        self.length = self.T - self.window - self.horizon
+        self.num_samples = self.data.shape[0] - window_size - horizon + 1
 
     def __len__(self):
-        return self.length
+        return max(0, self.num_samples)
 
     def __getitem__(self, idx):
-        x = self.panel[idx: idx + self.window, :]
-        y = self.panel[idx + self.window:
-                       idx + self.window + self.horizon, :]
+        w = self.window_size
+        h = self.horizon
+        x = self.data[idx:idx + w]                    # [W, N]
+        y = self.data[idx + w: idx + w + h]          # [H, N]
 
-        x = torch.from_numpy(x).unsqueeze(-1)  # [24, N, 1]
-        y = torch.from_numpy(y)                # [6, N]
+        x = x.unsqueeze(-1)  # [W, N, 1]
+        y = y.unsqueeze(-1)  # [H, N, 1]
         return x, y
 
 
 # ============================================================================
-# DATALOADER BUILDERS
+# Main function: build dataloaders
 # ============================================================================
 
 def get_base_dataloaders():
-    node_map = load_node_map()
+    """
+    Returns train_loader, val_loader, test_loader.
 
-    print("\n=== Building BASE PANELS ===")
-    train_panel = load_split_timeseries(TRAIN_DIR, node_map)
-    val_panel = load_split_timeseries(VAL_DIR, node_map)
-    test_panel = load_split_timeseries(TEST_DIR, node_map)
+    All heavy tensors remain on CPU. Batches are moved to GPU in train.py.
+    """
+    print("\n" + "="*60)
+    print("📦 BUILDING PROPERLY NORMALIZED DATALOADERS")
+    print("="*60)
 
-    print("\n=== Fitting scaler ===")
-    scaler = fit_scaler(train_panel)
+    # 1) Load raw matrices for each split
+    train_ts, train_mat = load_split_matrix(TRAIN_DIR)
+    val_ts,   val_mat   = load_split_matrix(VAL_DIR)
+    test_ts,  test_mat  = load_split_matrix(TEST_DIR)
 
-    train_panel = apply_scaler(train_panel, scaler)
-    val_panel = apply_scaler(val_panel, scaler)
-    test_panel = apply_scaler(test_panel, scaler)
+    print("\n📊 RAW DATA STATISTICS:")
+    def stats(name, mat):
+        flat = mat.reshape(-1)
+        non_zero = flat[flat > 0]
+        print(f"  {name}:")
+        print(f"    Shape: {mat.shape}")
+        print(f"    All - Min: {flat.min():.3f}, Mean: {flat.mean():.3f}, Max: {flat.max():.3f}")
+        if non_zero.size > 0:
+            print(f"    Non-zero - Min: {non_zero.min():.3f}, Median: {np.median(non_zero):.3f}, Mean: {non_zero.mean():.3f}")
 
-    train_ds = STGNNDataset(train_panel, WINDOW_SIZE, HORIZON)
-    val_ds = STGNNDataset(val_panel, WINDOW_SIZE, HORIZON)
-    test_ds = STGNNDataset(test_panel, WINDOW_SIZE, HORIZON)
+    stats("Train", train_mat)
+    stats("Val",   val_mat)
+    stats("Test",  test_mat)
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
-                              num_workers=NUM_WORKERS, pin_memory=True, drop_last=True)
+    # 2) Fit SmartScaler on TRAIN only
+    print("\n=== Fitting smart scaler ===")
+    scaler = SmartScaler()
+    train_norm = scaler.fit_transform(train_mat)
+    print("\n[scaler] Expected transformations (approx):")
+    for v in [0.0, 0.05, 0.117, 0.2, 0.5, 1.0, 10.0]:
+        print(f"  {v:6.3f} kWh → {((v - scaler.mean_) / (scaler.std_ + 1e-8)):7.2f}")
+    scaler.save(SCALER_PATH)
+    print(f"[scaler] Saved to {SCALER_PATH}")
 
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
-                            num_workers=NUM_WORKERS, pin_memory=True)
+    # 3) Apply same scaler to val/test
+    val_norm  = scaler.transform(val_mat)
+    test_norm = scaler.transform(test_mat)
 
-    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False,
-                             num_workers=NUM_WORKERS, pin_memory=True)
+    # 4) Check normalization stats
+    print("\n=== Applying smart normalization ===")
+    def norm_stats(name, mat):
+        flat = mat.reshape(-1)
+        print(f"  {name}: mean={flat.mean():.4f}, std={flat.std():.4f}")
+    norm_stats("Train", train_norm)
+    norm_stats("Val",   val_norm)
+    norm_stats("Test",  test_norm)
+    print("✅ Normalization OK (train~N(0,1); val/test may differ in std/mean due to distribution shift)")
 
-    print(f"[Base Loaders] Train={len(train_ds):,} Val={len(val_ds):,} Test={len(test_ds):,}")
+    # 5) Create Datasets (windowing on-the-fly)
+    W = cfg.WINDOW_SIZE
+    H = cfg.HORIZON
+
+    train_ds = STGNNDataset(train_norm, window_size=W, horizon=H)
+    val_ds   = STGNNDataset(val_norm,   window_size=W, horizon=H)
+    test_ds  = STGNNDataset(test_norm,  window_size=W, horizon=H)
+
+    print("\n=== Creating datasets ===")
+    print(f"✅ DATALOADERS READY:")
+    print(f"  Train: {len(train_ds)} samples")
+    print(f"  Val:   {len(val_ds)} samples")
+    print(f"  Test:  {len(test_ds)} samples")
+    print("="*60)
+
+    # 6) Build DataLoaders (still CPU-only)
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=cfg.BATCH_SIZE,
+        shuffle=True,
+        num_workers=cfg.NUM_WORKERS,
+        pin_memory=cfg.PIN_MEMORY,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=cfg.BATCH_SIZE,
+        shuffle=False,
+        num_workers=cfg.NUM_WORKERS,
+        pin_memory=cfg.PIN_MEMORY,
+    )
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=cfg.BATCH_SIZE,
+        shuffle=False,
+        num_workers=cfg.NUM_WORKERS,
+        pin_memory=cfg.PIN_MEMORY,
+    )
+
     return train_loader, val_loader, test_loader
 
 
-def get_cl_dataloaders():
-    node_map = load_node_map()
-    scaler = joblib.load(SCALER_PATH)
-
-    cl_loaders = {}
-    for cl in ["CL_1", "CL_2", "CL_3", "CL_4"]:
-        cl_dir = CL_DIR / cl
-        if not cl_dir.exists():
-            continue
-
-        print(f"\n=== Building {cl} ===")
-        panel = load_split_timeseries(cl_dir, node_map)
-        panel = apply_scaler(panel, scaler)
-
-        ds = STGNNDataset(panel, WINDOW_SIZE, HORIZON)
-        loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True,
-                            num_workers=NUM_WORKERS, pin_memory=True, drop_last=True)
-
-        cl_loaders[cl] = loader
-        print(f"[{cl}] Samples = {len(ds):,}")
-
-    return cl_loaders
-
-
-# ============================================================================
-# DIRECT TEST
-# ============================================================================
-
 if __name__ == "__main__":
-
+    # Simple test run
     train_loader, val_loader, test_loader = get_base_dataloaders()
-    cl_loaders = get_cl_dataloaders()
-
-    print("\n✅ GPU TEST BATCH:")
-    for X, Y in train_loader:
-        print("X:", X.shape)  # [B, 24, 8442, 1]
-        print("Y:", Y.shape)  # [B, 6, 8442]
-        break
+    batch = next(iter(train_loader))
+    X, Y = batch
+    print("\nSample batch shapes:")
+    print("  X:", X.shape)  # [B, W, N, 1]
+    print("  Y:", Y.shape)  # [B, H, N, 1]
