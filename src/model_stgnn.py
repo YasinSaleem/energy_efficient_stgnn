@@ -7,7 +7,7 @@ Energy-Efficient Spatio-Temporal GNN (ST-GNN) Model
 - Multi-step forecasting: predicts next H hours for all nodes
 
 Input X: [B, T_in, N, 1]
-Output Y: [B, H, N]
+Output Y: [B, H, N, 1]
 
 Author: Energy-Efficient STGNN Project
 """
@@ -146,12 +146,12 @@ class STGNNModel(nn.Module):
     """
     Spatio-Temporal GNN Model:
 
-    - Spatial: 1 or 2 GCN layers on each time step's graph snapshot
+    - Spatial: 1 or more GCN layers on each time step's graph snapshot
     - Temporal: GRU over time for each node
     - Readout: MLP to map GRU hidden state -> HORIZON future steps
 
     Input X: [B, T, N, 1]
-    Output:  [B, H, N]
+    Output:  [B, H, N, 1]
     """
 
     def __init__(self,
@@ -196,7 +196,6 @@ class STGNNModel(nn.Module):
 
         # Temporal GRU over time for each node
         # We'll reshape [B, T, N, F] -> [B*N, T, F]
-        # Note: GRU dropout only applies when num_layers > 1, so we add manual dropout
         self.gru = nn.GRU(
             input_size=gcn_hidden,
             hidden_size=gru_hidden,
@@ -217,7 +216,7 @@ class STGNNModel(nn.Module):
     def forward(self, x):
         """
         x: [B, T, N, 1]
-        returns: [B, H, N]
+        returns: [B, H, N, 1]
         """
         B, T, N, Fin = x.shape
         assert N == self.num_nodes, f"Expected {self.num_nodes} nodes, got {N}"
@@ -240,10 +239,15 @@ class STGNNModel(nn.Module):
         h_last = self.gru_dropout(h_last)
 
         # ----- Readout -----
-        out = self.fc_out(h_last)  # [B*N, horizon]
-        out = self.dropout(out)    # Apply final dropout
+        out = self.fc_out(h_last)          # [B*N, horizon]
+        out = self.dropout(out)            # [B*N, horizon]
+
+        # Reshape back to [B, H, N]
         out = out.view(B, N, self.horizon)  # [B, N, H]
         out = out.permute(0, 2, 1)          # [B, H, N]
+
+        # Match dataloader target shape: [B, H, N, 1]
+        out = out.unsqueeze(-1)             # [B, H, N, 1]
 
         return out
 
@@ -293,8 +297,8 @@ if __name__ == "__main__":
 
     # Dummy batch to verify shape
     B = 4
-    T_in = 24
-    H_out = 6
+    T_in = cfg.WINDOW_SIZE
+    H_out = cfg.HORIZON
 
     with NODE_MAP_PATH.open("r") as f:
         num_nodes = len(json.load(f))
@@ -303,4 +307,4 @@ if __name__ == "__main__":
     y_hat = model(x_dummy)
 
     print(f"Input shape:  {x_dummy.shape}")
-    print(f"Output shape: {y_hat.shape}")  # [B, H, N]
+    print(f"Output shape: {y_hat.shape}")  # [B, H, N, 1]
