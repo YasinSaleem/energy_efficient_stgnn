@@ -33,20 +33,29 @@ PLOTS_DIR = RESULTS_ROOT / "plots"
 # ============================================================================
 
 # Basic training settings
-EPOCHS = 20                          # Maximum epochs (reduced from 30)
-LEARNING_RATE = 8e-4                 # Initial learning rate (reduced from 1e-3)
-WEIGHT_DECAY = 5e-4                  # L2 regularization (increased from 1e-4)
-EARLY_STOPPING_PATIENCE = 6          # Stop after N bad epochs (back to original)
+EPOCHS = 20                          # Maximum epochs
+LEARNING_RATE = 3e-4                 # Initial learning rate (target after warmup)
+WEIGHT_DECAY = 6e-4                  # L2 regularization
+EARLY_STOPPING_PATIENCE = 6          # Stop after N bad epochs
+
+# Warmup settings
+WARMUP_EPOCHS = 6                    # Number of warmup epochs
+WARMUP_START_LR = 1e-5               # Starting LR for warmup
 
 # Gradient clipping
-GRADIENT_CLIP_NORM = 2.0             # Max gradient norm for clipping (less conservative)
+GRADIENT_CLIP_NORM = 2.0             # Max gradient norm for clipping
 
 # Learning rate scheduler (ReduceLROnPlateau)
 SCHEDULER_MODE = 'min'               # Minimize validation metric
-SCHEDULER_FACTOR = 0.5               # Reduce LR by this factor
-SCHEDULER_PATIENCE = 2               # Epochs to wait before reducing LR
+SCHEDULER_FACTOR = 0.3               # Reduce LR by this factor
+SCHEDULER_PATIENCE = 5               # Epochs to wait before reducing LR
 SCHEDULER_MIN_LR = 1e-6              # Minimum learning rate
 SCHEDULER_VERBOSE = True             # Print LR changes
+
+# Exponential Moving Average (EMA) of weights
+USE_EMA = True                       # Enable EMA for model weights
+EMA_DECAY = 0.999                    # EMA decay rate (higher = smoother)
+EMA_UPDATE_AFTER_STEP = 100          # Start EMA after N training steps
 
 # ============================================================================
 # MODEL ARCHITECTURE
@@ -61,9 +70,9 @@ GRU_HIDDEN = 32                      # Hidden state size in GRU
 GRU_LAYERS = 1                       # Number of GRU layers
 
 # Regularization
-SPATIAL_DROPOUT = 0.2                # Dropout in GCN layers (moderate increase from 0.1)
-TEMPORAL_DROPOUT = 0.2               # Dropout in GRU (moderate, was 0.0)
-FINAL_DROPOUT = 0.2                  # Dropout before output layer
+SPATIAL_DROPOUT = 0.30               # Dropout in GCN layers
+TEMPORAL_DROPOUT = 0.30              # Dropout in GRU
+FINAL_DROPOUT = 0.30                 # Dropout before output layer
 
 # Forecasting
 HORIZON = 6                          # Hours to forecast ahead
@@ -76,7 +85,7 @@ HORIZON = 6                          # Hours to forecast ahead
 WINDOW_SIZE = 24                     # Input window (hours)
 
 # DataLoader settings
-BATCH_SIZE = 4                       # Batch size (RTX 4050 safe)
+BATCH_SIZE = 8                       # Batch size (RTX 4050 safe)
 NUM_WORKERS = 0                      # DataLoader workers (0 for Windows safety)
 PIN_MEMORY = True                    # Pin memory for GPU transfer
 
