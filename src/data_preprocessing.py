@@ -285,6 +285,78 @@ def get_base_dataloaders():
     return train_loader, val_loader, test_loader
 
 
+def get_cl_dataloaders():
+    """
+    Returns dictionary of continual learning DataLoaders.
+    
+    Uses the SAME scaler fitted on training data (loaded from disk).
+    This ensures consistent normalization for continual learning windows.
+    
+    Returns:
+        dict: {"CL_1": loader1, "CL_2": loader2, "CL_3": loader3, "CL_4": loader4}
+    """
+    print("\n" + "="*60)
+    print("📦 BUILDING CONTINUAL LEARNING DATALOADERS")
+    print("="*60)
+    
+    # Define CL directories
+    CL_DIRS = {
+        "CL_1": SPLITS_DIR / "continual" / "CL_1",
+        "CL_2": SPLITS_DIR / "continual" / "CL_2",
+        "CL_3": SPLITS_DIR / "continual" / "CL_3",
+        "CL_4": SPLITS_DIR / "continual" / "CL_4",
+    }
+    
+    # Load the scaler fitted on training data
+    if not SCALER_PATH.exists():
+        raise FileNotFoundError(
+            f"Scaler not found: {SCALER_PATH}\n"
+            "Please run base training first to generate the scaler."
+        )
+    
+    print(f"\n[scaler] Loading existing scaler from {SCALER_PATH}")
+    scaler = SmartScaler()
+    scaler.load(SCALER_PATH)
+    print(f"[scaler] Loaded: mean={scaler.mean_:.6f}, std={scaler.std_:.6f}")
+    
+    cl_loaders = {}
+    
+    for cl_name, cl_dir in CL_DIRS.items():
+        if not cl_dir.exists():
+            print(f"\n⚠️  Warning: {cl_name} directory not found: {cl_dir}")
+            continue
+        
+        print(f"\n[{cl_name}] Loading data...")
+        cl_ts, cl_mat = load_split_matrix(cl_dir)
+        
+        # Apply the EXISTING scaler (no refitting)
+        cl_norm = scaler.transform(cl_mat)
+        print(f"[{cl_name}] Normalized: mean={cl_norm.mean():.4f}, std={cl_norm.std():.4f}")
+        
+        # Create dataset with same window/horizon
+        W = cfg.WINDOW_SIZE
+        H = cfg.HORIZON
+        cl_ds = STGNNDataset(cl_norm, window_size=W, horizon=H)
+        print(f"[{cl_name}] Dataset: {len(cl_ds)} samples")
+        
+        # Create DataLoader
+        cl_loader = DataLoader(
+            cl_ds,
+            batch_size=cfg.BATCH_SIZE,
+            shuffle=False,  # Keep temporal order for CL
+            num_workers=cfg.NUM_WORKERS,
+            pin_memory=cfg.PIN_MEMORY,
+        )
+        
+        cl_loaders[cl_name] = cl_loader
+    
+    print("\n" + "="*60)
+    print(f"✅ CL DATALOADERS READY: {len(cl_loaders)} windows")
+    print("="*60)
+    
+    return cl_loaders
+
+
 if __name__ == "__main__":
     # Simple test run
     train_loader, val_loader, test_loader = get_base_dataloaders()
@@ -293,3 +365,13 @@ if __name__ == "__main__":
     print("\nSample batch shapes:")
     print("  X:", X.shape)  # [B, W, N, 1]
     print("  Y:", Y.shape)  # [B, H, N, 1]
+    
+    # Test CL loaders
+    print("\n" + "="*60)
+    print("Testing CL DataLoaders...")
+    cl_loaders = get_cl_dataloaders()
+    for cl_name, cl_loader in cl_loaders.items():
+        print(f"\n{cl_name}: {len(cl_loader)} batches")
+        if len(cl_loader) > 0:
+            X_cl, Y_cl = next(iter(cl_loader))
+            print(f"  Batch shapes - X: {X_cl.shape}, Y: {Y_cl.shape}")
