@@ -13,12 +13,26 @@ python train.py
 ```
 **Output:** `src/models/stgnn_best.pt`
 
+**What it does:**
+- Standard training with AdamW optimizer
+- ReduceLROnPlateau scheduler
+- Standard early stopping (patience=5, no min_delta)
+- No pruning applied
+- Saves best model by validation RMSE
+
 ### 2. Energy-Optimized Training
 ```bash
 cd src/
-python energy_optmization.py
+python train_optimized.py
 ```
 **Output:** `src/models/stgnn_best_opt.pt`
+
+**What it does:**
+- Same base training as above
+- **Enhanced early stopping** (patience=5, min_delta=1e-4, warmup=3)
+- **Structured pruning** (30% of Linear layer weights) applied after training
+- Optimizations match those used in energy-optimized CL
+- Ready for continual learning with consistent optimization strategy
 
 ### 3. Data Requirements
 - Train/val/test splits: `data/splits/train_panel.npz`, `val_panel.npz`, `test_panel.npz`
@@ -158,7 +172,7 @@ FileNotFoundError: Base model not found: src/models/stgnn_best.pt
 ```
 FileNotFoundError: Energy-optimized model not found: src/models/stgnn_best_opt.pt
 ```
-**Solution:** Run `python energy_optmization.py` first.
+**Solution:** Run `python train_optimized.py` first.
 
 ### No CL Windows Found
 ```
@@ -194,7 +208,7 @@ cd src/
 python train.py
 
 # 2. Energy-optimized training
-python energy_optmization.py
+python train_optimized.py
 
 # 3a. Base CL
 python continual_learning.py
