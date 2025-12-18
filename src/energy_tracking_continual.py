@@ -39,12 +39,15 @@ from continual_learning import run_continual_learning
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"[device] Using: {DEVICE}")
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# Base directory = src/
+BASE_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = BASE_DIR.parent
 
-ENERGY_RESULTS_DIR = PROJECT_ROOT / "results" / "energy_tracking"
-ENERGY_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+# Align with continual_learning.py results structure
+CL_RESULTS_DIR = BASE_DIR / "results" / "continual_learning"
+CL_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-ENERGY_LOGS_DIR = ENERGY_RESULTS_DIR / "codecarbon_logs"
+ENERGY_LOGS_DIR = CL_RESULTS_DIR
 ENERGY_LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -75,7 +78,8 @@ def run_continual_learning_with_energy():
     # Set up CodeCarbon tracker
     tracker = EmissionsTracker(
         project_name="STGNN_ContinualLearning",
-        output_dir=str(ENERGY_LOGS_DIR),
+        output_dir=str(CL_RESULTS_DIR),
+        output_file="emissions_continual.csv",
         log_level="error",     # keep it quiet, logs go to file
         save_to_file=True,
     )
@@ -139,19 +143,20 @@ def run_continual_learning_with_energy():
         "continual_learning_results": cl_results,
     }
 
-    output_path = ENERGY_RESULTS_DIR / "cl_energy_results.json"
+    output_path = CL_RESULTS_DIR / "continual_learning_results_with_energy.json"
     with output_path.open("w") as f:
         json.dump(combined_results, f, indent=2)
 
     print(f"\n💾 Saved combined energy + CL results to: {output_path}")
-    print(f"💾 CodeCarbon logs directory: {ENERGY_LOGS_DIR}")
+    print(f"📊 Base CL results also saved to: {CL_RESULTS_DIR / 'continual_learning_results.json'}")
+    print(f"💾 CodeCarbon emissions CSV: {CL_RESULTS_DIR}/emissions.csv")
     print("\n✅ ENERGY TRACKING COMPLETED!\n")
 
     return combined_results
 
 
 # ============================================================================ #
-# ENTRY POINT
+ # ENTRY POINT
 # ============================================================================ #
 
 if __name__ == "__main__":
